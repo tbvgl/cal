@@ -1,5 +1,5 @@
 import { faker } from "@faker-js/faker";
-import { Booking, BookingStatus, EventType, Prisma, UserPlan, Webhook } from "@prisma/client";
+import { Booking, BookingStatus, EventType, Prisma, Webhook } from "@prisma/client";
 
 import { CalendarEvent, Person, VideoCallData } from "@calcom/types/Calendar";
 
@@ -19,7 +19,7 @@ export const buildPerson = (person?: Partial<Person>): Person => {
     email: faker.internet.email(),
     timeZone: faker.address.timeZone(),
     username: faker.internet.userName(),
-    id: faker.datatype.uuid(),
+    id: faker.datatype.number(),
     language: {
       locale: faker.random.locale(),
       translate: (key: string) => key,
@@ -85,6 +85,7 @@ export const buildEventType = (eventType?: Partial<EventType>): EventType => {
     beforeEventBuffer: 0,
     afterEventBuffer: 0,
     seatsPerTimeSlot: null,
+    seatsShowAttendees: null,
     schedulingType: null,
     scheduleId: null,
     bookingLimits: null,
@@ -196,7 +197,6 @@ export const buildUser = <T extends Partial<UserPayload>>(user?: T): UserPayload
     locale: "en",
     metadata: null,
     password: null,
-    plan: UserPlan.PRO,
     role: "USER",
     schedules: [],
     selectedCalendars: [],

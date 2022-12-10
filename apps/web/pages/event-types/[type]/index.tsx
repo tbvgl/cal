@@ -1,43 +1,46 @@
 /* eslint-disable @typescript-eslint/no-empty-function */
-import autoAnimate from "@formkit/auto-animate";
-import { EventTypeCustomInput, PeriodType, Prisma, SchedulingType } from "@prisma/client";
+import { useAutoAnimate } from "@formkit/auto-animate/react";
+import { PeriodType, Prisma, SchedulingType } from "@prisma/client";
 import { GetServerSidePropsContext } from "next";
 import { useRouter } from "next/router";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
 import { StripeData } from "@calcom/app-store/stripepayment/lib/server";
-import getApps, { getEventTypeAppData, getLocationOptions } from "@calcom/app-store/utils";
-import { LocationObject, EventLocationType } from "@calcom/core/location";
-import { parseRecurringEvent, parseBookingLimit, validateBookingLimitOrder } from "@calcom/lib";
+import { getEventTypeAppData, getLocationOptions } from "@calcom/app-store/utils";
+import { EventLocationType, LocationObject } from "@calcom/core/location";
+import { parseBookingLimit, parseRecurringEvent, validateBookingLimitOrder } from "@calcom/lib";
+import getEnabledApps from "@calcom/lib/apps/getEnabledApps";
 import { CAL_URL } from "@calcom/lib/constants";
+import convertToNewDurationType from "@calcom/lib/convertToNewDurationType";
+import findDurationType from "@calcom/lib/findDurationType";
 import getStripeAppData from "@calcom/lib/getStripeAppData";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
+import { HttpError } from "@calcom/lib/http-error";
 import prisma from "@calcom/prisma";
-import { EventTypeMetaDataSchema } from "@calcom/prisma/zod-utils";
+import { customInputSchema, EventTypeMetaDataSchema } from "@calcom/prisma/zod-utils";
 import { trpc } from "@calcom/trpc/react";
 import type { BookingLimit, RecurringEvent } from "@calcom/types/Calendar";
-import { Form } from "@calcom/ui/form/fields";
-import { showToast } from "@calcom/ui/v2";
+import { Form, showToast } from "@calcom/ui";
 
 import { asStringOrThrow } from "@lib/asStringOrNull";
 import { getSession } from "@lib/auth";
-import { HttpError } from "@lib/core/http/error";
 import { inferSSRProps } from "@lib/types/inferSSRProps";
 
-import { AvailabilityTab } from "@components/v2/eventtype/AvailabilityTab";
+import { AvailabilityTab } from "@components/eventtype/AvailabilityTab";
 // These can't really be moved into calcom/ui due to the fact they use infered getserverside props typings
-import { EventAdvancedTab } from "@components/v2/eventtype/EventAdvancedTab";
-import { EventAppsTab } from "@components/v2/eventtype/EventAppsTab";
-import { EventLimitsTab } from "@components/v2/eventtype/EventLimitsTab";
-import { EventRecurringTab } from "@components/v2/eventtype/EventRecurringTab";
-import { EventSetupTab } from "@components/v2/eventtype/EventSetupTab";
-import { EventTeamTab } from "@components/v2/eventtype/EventTeamTab";
-import { EventTypeSingleLayout } from "@components/v2/eventtype/EventTypeSingleLayout";
-import EventWorkflowsTab from "@components/v2/eventtype/EventWorkfowsTab";
+import { EventAdvancedTab } from "@components/eventtype/EventAdvancedTab";
+import { EventAppsTab } from "@components/eventtype/EventAppsTab";
+import { EventLimitsTab } from "@components/eventtype/EventLimitsTab";
+import { EventRecurringTab } from "@components/eventtype/EventRecurringTab";
+import { EventSetupTab } from "@components/eventtype/EventSetupTab";
+import { EventTeamTab } from "@components/eventtype/EventTeamTab";
+import { EventTypeSingleLayout } from "@components/eventtype/EventTypeSingleLayout";
+import EventWorkflowsTab from "@components/eventtype/EventWorkfowsTab";
 
 import { getTranslation } from "@server/lib/i18n";
+import { ssrInit } from "@server/lib/ssr";
 
 export type FormValues = {
   title: string;
@@ -56,12 +59,13 @@ export type FormValues = {
   locations: {
     type: EventLocationType["type"];
     address?: string;
+    attendeeAddress?: string;
     link?: string;
     hostPhoneNumber?: string;
     displayLocationPublicly?: boolean;
     phone?: string;
   }[];
-  customInputs: EventTypeCustomInput[];
+  customInputs: CustomInputParsed[];
   users: string[];
   schedule: number;
   periodType: PeriodType;
@@ -69,8 +73,10 @@ export type FormValues = {
   periodCountCalendarDays: "1" | "0";
   periodDates: { startDate: Date; endDate: Date };
   seatsPerTimeSlot: number | null;
+  seatsShowAttendees: boolean | null;
   seatsPerTimeSlotEnabled: boolean;
   minimumBookingNotice: number;
+  minimumBookingNoticeInDurationType: number;
   beforeBufferTime: number;
   afterBufferTime: number;
   slotInterval: number | null;
@@ -83,6 +89,8 @@ export type FormValues = {
   bookingLimits?: BookingLimit;
 };
 
+export type CustomInputParsed = typeof customInputSchema._output;
+
 const querySchema = z.object({
   tabName: z
     .enum(["setup", "availability", "apps", "limits", "recurring", "team", "advanced", "workflows"])
@@ -94,26 +102,21 @@ export type EventTypeSetupInfered = inferSSRProps<typeof getServerSideProps>;
 
 const EventTypePage = (props: inferSSRProps<typeof getServerSideProps>) => {
   const { t } = useLocale();
-  const { data: eventTypeApps } = trpc.useQuery([
-    "viewer.apps",
-    {
-      extendsFeature: "EventType",
-    },
-  ]);
+  const { data: eventTypeApps } = trpc.viewer.apps.useQuery({
+    extendsFeature: "EventType",
+  });
 
   const { eventType: dbEventType, locationOptions, team, teamMembers } = props;
   // TODO: It isn't a good idea to maintain state using setEventType. If we want to connect the SSR'd data to tRPC, we should useQuery(["viewer.eventTypes.get"]) with initialData
   // Due to this change, when Form is saved, there is no way to propagate that info to eventType (e.g. disabling stripe app doesn't allow recurring tab to be enabled without refresh).
   const [eventType, setEventType] = useState(dbEventType);
-  const animationParentRef = useRef(null);
+
   const router = useRouter();
   const { tabName } = querySchema.parse(router.query);
 
-  useEffect(() => {
-    animationParentRef.current && autoAnimate(animationParentRef.current);
-  }, [animationParentRef]);
+  const [animationParentRef] = useAutoAnimate<HTMLDivElement>();
 
-  const updateMutation = trpc.useMutation("viewer.eventTypes.update", {
+  const updateMutation = trpc.viewer.eventTypes.update.useMutation({
     onSuccess: async ({ eventType: newEventType }) => {
       setEventType({ ...eventType, slug: newEventType.slug });
       showToast(
@@ -134,12 +137,14 @@ const EventTypePage = (props: inferSSRProps<typeof getServerSideProps>) => {
         message = `${err.data.code}: You are not able to update this event`;
       }
 
-      if (err.data?.code === "PARSE_ERROR") {
+      if (err.data?.code === "PARSE_ERROR" || err.data?.code === "BAD_REQUEST") {
         message = `${err.data.code}: ${err.message}`;
       }
 
       if (message) {
         showToast(message, "error");
+      } else {
+        showToast(err.message, "error");
       }
     },
   });
@@ -148,6 +153,21 @@ const EventTypePage = (props: inferSSRProps<typeof getServerSideProps>) => {
     startDate: new Date(eventType.periodStartDate || Date.now()),
     endDate: new Date(eventType.periodEndDate || Date.now()),
   });
+
+  const metadata = eventType.metadata;
+  // fallback to !!eventType.schedule when 'useHostSchedulesForTeamEvent' is undefined
+  if (!!team) {
+    metadata.config = {
+      ...metadata.config,
+      useHostSchedulesForTeamEvent:
+        typeof eventType.metadata.config?.useHostSchedulesForTeamEvent !== "undefined"
+          ? eventType.metadata.config?.useHostSchedulesForTeamEvent === true
+          : !!eventType.schedule,
+    };
+  } else {
+    // Make sure non-team events NEVER have this config key;
+    delete metadata.config?.useHostSchedulesForTeamEvent;
+  }
 
   const formMethods = useForm<FormValues>({
     defaultValues: {
@@ -162,9 +182,16 @@ const EventTypePage = (props: inferSSRProps<typeof getServerSideProps>) => {
         startDate: periodDates.startDate,
         endDate: periodDates.endDate,
       },
+      periodType: eventType.periodType,
+      periodCountCalendarDays: eventType.periodCountCalendarDays ? "1" : "0",
       schedulingType: eventType.schedulingType,
       minimumBookingNotice: eventType.minimumBookingNotice,
-      metadata: eventType.metadata,
+      minimumBookingNoticeInDurationType: convertToNewDurationType(
+        "minutes",
+        findDurationType(eventType.minimumBookingNotice),
+        eventType.minimumBookingNotice
+      ),
+      metadata,
     },
   });
 
@@ -191,7 +218,7 @@ const EventTypePage = (props: inferSSRProps<typeof getServerSideProps>) => {
         teamMembers={teamMembers}
       />
     ),
-    availability: <AvailabilityTab />,
+    availability: <AvailabilityTab isTeamEvent={!!team} />,
     team: (
       <EventTeamTab
         eventType={eventType}
@@ -219,6 +246,7 @@ const EventTypePage = (props: inferSSRProps<typeof getServerSideProps>) => {
       enabledWorkflowsNumber={eventType.workflows.length}
       eventType={eventType}
       team={team}
+      isUpdateMutationLoading={updateMutation.isLoading}
       formMethods={formMethods}
       disableBorder={tabName === "apps" || tabName === "workflows"}
       currentUserMembership={props.currentUserMembership}>
@@ -232,19 +260,33 @@ const EventTypePage = (props: inferSSRProps<typeof getServerSideProps>) => {
             beforeBufferTime,
             afterBufferTime,
             seatsPerTimeSlot,
+            seatsShowAttendees,
             bookingLimits,
             recurringEvent,
             locations,
             metadata,
-            // We don't need to send it to the backend
+            customInputs,
+            // We don't need to send send these values to the backend
             // eslint-disable-next-line @typescript-eslint/no-unused-vars
             seatsPerTimeSlotEnabled,
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            minimumBookingNoticeInDurationType,
             ...input
           } = values;
 
           if (bookingLimits) {
             const isValid = validateBookingLimitOrder(bookingLimits);
-            if (!isValid) throw new Error("Booking limits must be in accending order. [day,week,month,year]");
+            if (!isValid) throw new Error(t("event_setup_booking_limits_error"));
+          }
+
+          if (metadata?.multipleDuration !== undefined) {
+            if (metadata?.multipleDuration.length < 1) {
+              throw new Error(t("event_setup_multiple_duration_error"));
+            } else {
+              if (input.length && !metadata?.multipleDuration?.includes(input.length)) {
+                throw new Error(t("event_setup_multiple_duration_default_error"));
+              }
+            }
           }
 
           updateMutation.mutate({
@@ -259,7 +301,9 @@ const EventTypePage = (props: inferSSRProps<typeof getServerSideProps>) => {
             afterEventBuffer: afterBufferTime,
             bookingLimits,
             seatsPerTimeSlot,
+            seatsShowAttendees,
             metadata,
+            customInputs,
           });
         }}>
         <div ref={animationParentRef} className="space-y-6">
@@ -274,6 +318,7 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
   const { req, query } = context;
   const session = await getSession({ req });
   const typeParam = parseInt(asStringOrThrow(query.type));
+  const ssr = await ssrInit(context);
 
   if (Number.isNaN(typeParam)) {
     return {
@@ -296,7 +341,6 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
     id: true,
     avatar: true,
     email: true,
-    plan: true,
     locale: true,
     defaultScheduleId: true,
   });
@@ -391,6 +435,7 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
       price: true,
       destinationCalendar: true,
       seatsPerTimeSlot: true,
+      seatsShowAttendees: true,
       workflows: {
         include: {
           workflow: {
@@ -422,6 +467,9 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
   const credentials = await prisma.credential.findMany({
     where: {
       userId: session.user.id,
+      app: {
+        enabled: true,
+      },
     },
     select: {
       id: true,
@@ -429,6 +477,7 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
       key: true,
       userId: true,
       appId: true,
+      invalid: true,
     },
   });
 
@@ -456,13 +505,16 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
   // const parsedMetaData = _EventTypeModel.parse(newMetadata);
   const parsedMetaData = newMetadata;
 
+  const parsedCustomInputs = (rawEventType.customInputs || []).map((input) => customInputSchema.parse(input));
+
   const eventType = {
     ...restEventType,
-    schedule: rawEventType.schedule?.id || rawEventType.users[0].defaultScheduleId,
+    schedule: rawEventType.schedule?.id || rawEventType.users[0]?.defaultScheduleId || null,
     recurringEvent: parseRecurringEvent(restEventType.recurringEvent),
     bookingLimits: parseBookingLimit(restEventType.bookingLimits),
     locations: locations as unknown as LocationObject[],
     metadata: parsedMetaData,
+    customInputs: parsedCustomInputs,
   };
 
   // backwards compat
@@ -478,7 +530,7 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
   }
   const currentUser = eventType.users.find((u) => u.id === session.user.id);
   const t = await getTranslation(currentUser?.locale ?? "en", "common");
-  const integrations = getApps(credentials);
+  const integrations = await getEnabledApps(credentials);
   const locationOptions = getLocationOptions(integrations, t);
 
   const eventTypeObject = Object.assign({}, eventType, {
@@ -507,6 +559,7 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
       team: eventTypeObject.team || null,
       teamMembers,
       currentUserMembership,
+      trpcState: ssr.dehydrate(),
     },
   };
 };

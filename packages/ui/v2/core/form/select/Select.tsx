@@ -12,7 +12,7 @@ import ReactSelect, {
 import classNames from "@calcom/lib/classNames";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 
-import { Label } from "../fields";
+import { Label } from "../../../../components/form/inputs/Label";
 import {
   ControlComponent,
   InputComponent,
@@ -65,13 +65,32 @@ const Select = <
 >({
   className,
   components,
+  styles,
   ...props
 }: SelectProps<Option, IsMulti, Group>) => {
   const reactSelectProps = React.useMemo(() => {
     return getReactSelectProps<Option, IsMulti, Group>({ className, components: components || {} });
   }, [className, components]);
 
-  return <ReactSelect {...reactSelectProps} {...props} />;
+  return (
+    <ReactSelect
+      {...reactSelectProps}
+      {...props}
+      styles={{
+        option: (defaultStyles, state) => ({
+          ...defaultStyles,
+          backgroundColor: state.isSelected
+            ? state.isFocused
+              ? "var(--brand-color)"
+              : "var(--brand-color)"
+            : state.isFocused
+            ? "var(--brand-color-dark-mode)"
+            : "var(--brand-text-color)",
+        }),
+        ...styles,
+      }}
+    />
+  );
 };
 
 export const SelectField = function SelectField<

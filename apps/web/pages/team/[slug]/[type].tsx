@@ -1,4 +1,3 @@
-import { UserPlan } from "@prisma/client";
 import { GetServerSidePropsContext } from "next";
 
 import { privacyFilteredLocations, LocationObject } from "@calcom/core/location";
@@ -10,12 +9,13 @@ import { asStringOrNull } from "@lib/asStringOrNull";
 import { getWorkingHours } from "@lib/availability";
 import getBooking, { GetBookingType } from "@lib/getBooking";
 import { inferSSRProps } from "@lib/types/inferSSRProps";
+import { EmbedProps } from "@lib/withEmbedSsr";
 
 import AvailabilityPage from "@components/booking/pages/AvailabilityPage";
 
 import { ssgInit } from "@server/lib/ssg";
 
-export type AvailabilityTeamPageProps = inferSSRProps<typeof getServerSideProps>;
+export type AvailabilityTeamPageProps = inferSSRProps<typeof getServerSideProps> & EmbedProps;
 
 export default function TeamType(props: AvailabilityTeamPageProps) {
   return <AvailabilityPage {...props} />;
@@ -42,6 +42,7 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
       name: true,
       slug: true,
       logo: true,
+      hideBranding: true,
       eventTypes: {
         where: {
           slug: typeParam,
@@ -58,7 +59,6 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
               username: true,
               timeZone: true,
               hideBranding: true,
-              plan: true,
               brandColor: true,
               darkBrandColor: true,
             },
@@ -99,6 +99,8 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
   if (!team || team.eventTypes.length != 1) {
     return {
       notFound: true,
+    } as {
+      notFound: true;
     };
   }
 
@@ -126,7 +128,6 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
       name: user.name,
       username: user.username,
       hideBranding: user.hideBranding,
-      plan: user.plan,
       timeZone: user.timeZone,
     })),
   });
@@ -140,8 +141,6 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
 
   return {
     props: {
-      // Team is always pro
-      plan: "PRO" as UserPlan,
       profile: {
         name: team.name || team.slug,
         slug: team.slug,
@@ -157,6 +156,7 @@ export const getServerSideProps = async (context: GetServerSidePropsContext) => 
       previousPage: context.req.headers.referer ?? null,
       booking,
       trpcState: ssg.dehydrate(),
+      isBrandingHidden: team.hideBranding,
     },
   };
 };

@@ -12,7 +12,7 @@ import prisma from "@calcom/prisma";
 
 import { inferSSRProps } from "@lib/types/inferSSRProps";
 
-import App from "@components/v2/apps/App";
+import App from "@components/apps/App";
 
 const components = {
   a: ({ href = "", ...otherProps }: JSX.IntrinsicElements["a"]) => (
@@ -34,6 +34,7 @@ function SingleAppPage({ data, source }: inferSSRProps<typeof getStaticProps>) {
   return (
     <App
       name={data.name}
+      description={data.description}
       isGlobal={data.isGlobal}
       slug={data.slug}
       variant={data.variant}

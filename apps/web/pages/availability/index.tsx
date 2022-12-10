@@ -1,32 +1,31 @@
-import autoAnimate from "@formkit/auto-animate";
-import { useRef, useEffect } from "react";
+import { useAutoAnimate } from "@formkit/auto-animate/react";
+import { GetServerSidePropsContext } from "next";
 
 import { NewScheduleButton, ScheduleListItem } from "@calcom/features/schedules";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
-import { inferQueryOutput, trpc } from "@calcom/trpc/react";
-import { Icon } from "@calcom/ui/Icon";
-import Shell from "@calcom/ui/Shell";
-import { EmptyScreen, showToast } from "@calcom/ui/v2";
+import { RouterOutputs, trpc } from "@calcom/trpc/react";
+import { EmptyScreen, Icon, Shell, showToast } from "@calcom/ui";
 
 import { withQuery } from "@lib/QueryCell";
 import { HttpError } from "@lib/core/http/error";
 
-import SkeletonLoader from "@components/v2/availability/SkeletonLoader";
+import SkeletonLoader from "@components/availability/SkeletonLoader";
 
-export function AvailabilityList({ schedules }: inferQueryOutput<"viewer.availability.list">) {
+import { ssrInit } from "@server/lib/ssr";
+
+export function AvailabilityList({ schedules }: RouterOutputs["viewer"]["availability"]["list"]) {
   const { t } = useLocale();
   const utils = trpc.useContext();
-  const animationParentRef = useRef(null);
 
-  const meQuery = trpc.useQuery(["viewer.me"]);
+  const meQuery = trpc.viewer.me.useQuery();
 
-  const deleteMutation = trpc.useMutation("viewer.availability.schedule.delete", {
+  const deleteMutation = trpc.viewer.availability.schedule.delete.useMutation({
     onMutate: async ({ scheduleId }) => {
-      await utils.cancelQuery(["viewer.availability.list"]);
-      const previousValue = utils.getQueryData(["viewer.availability.list"]);
+      await utils.viewer.availability.list.cancel();
+      const previousValue = utils.viewer.availability.list.getData();
       if (previousValue) {
         const filteredValue = previousValue.schedules.filter(({ id }) => id !== scheduleId);
-        utils.setQueryData(["viewer.availability.list"], { ...previousValue, schedules: filteredValue });
+        utils.viewer.availability.list.setData(undefined, { ...previousValue, schedules: filteredValue });
       }
 
       return { previousValue };
@@ -34,7 +33,7 @@ export function AvailabilityList({ schedules }: inferQueryOutput<"viewer.availab
 
     onError: (err, variables, context) => {
       if (context?.previousValue) {
-        utils.setQueryData(["viewer.availability.list"], context.previousValue);
+        utils.viewer.availability.list.setData(undefined, context.previousValue);
       }
       if (err instanceof HttpError) {
         const message = `${err.statusCode}: ${err.message}`;
@@ -42,17 +41,34 @@ export function AvailabilityList({ schedules }: inferQueryOutput<"viewer.availab
       }
     },
     onSettled: () => {
-      utils.invalidateQueries(["viewer.availability.list"]);
+      utils.viewer.availability.list.invalidate();
     },
     onSuccess: () => {
       showToast(t("schedule_deleted_successfully"), "success");
     },
   });
 
+  const updateMutation = trpc.viewer.availability.schedule.update.useMutation({
+    onSuccess: async ({ schedule }) => {
+      await utils.viewer.availability.list.invalidate();
+      showToast(
+        t("availability_updated_successfully", {
+          scheduleName: schedule.name,
+        }),
+        "success"
+      );
+    },
+    onError: (err) => {
+      if (err instanceof HttpError) {
+        const message = `${err.statusCode}: ${err.message}`;
+        showToast(message, "error");
+      }
+    },
+  });
+
   // Adds smooth delete button - item fades and old item slides into place
-  useEffect(() => {
-    animationParentRef.current && autoAnimate(animationParentRef.current);
-  }, [animationParentRef]);
+
+  const [animationParentRef] = useAutoAnimate<HTMLUListElement>();
 
   return (
     <>
@@ -76,6 +92,7 @@ export function AvailabilityList({ schedules }: inferQueryOutput<"viewer.availab
                 }}
                 key={schedule.id}
                 schedule={schedule}
+                updateDefault={updateMutation.mutate}
                 deleteFunction={deleteMutation.mutate}
               />
             ))}
@@ -86,7 +103,7 @@ export function AvailabilityList({ schedules }: inferQueryOutput<"viewer.availab
   );
 }
 
-const WithQuery = withQuery(["viewer.availability.list"]);
+const WithQuery = withQuery(trpc.viewer.availability.list);
 
 export default function AvailabilityPage() {
   const { t } = useLocale();
@@ -98,3 +115,13 @@ export default function AvailabilityPage() {
     </div>
   );
 }
+
+export const getServerSideProps = async (context: GetServerSidePropsContext) => {
+  const ssr = await ssrInit(context);
+
+  return {
+    props: {
+      trpcState: ssr.dehydrate(),
+    },
+  };
+};

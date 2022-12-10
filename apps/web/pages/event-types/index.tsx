@@ -1,45 +1,55 @@
 import { useAutoAnimate } from "@formkit/auto-animate/react";
-import Head from "next/head";
+import { GetServerSidePropsContext } from "next";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import React, { Fragment, useEffect, useState } from "react";
 
-import { CAL_URL, WEBAPP_URL } from "@calcom/lib/constants";
+import CreateEventTypeButton from "@calcom/features/eventtypes/components/CreateEventTypeButton";
+import { APP_NAME, CAL_URL, WEBAPP_URL } from "@calcom/lib/constants";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
-import { inferQueryOutput, trpc } from "@calcom/trpc/react";
-import { TRPCClientError } from "@calcom/trpc/react";
-import { Icon } from "@calcom/ui";
-import { Badge, Button, ButtonGroup, Dialog, EmptyScreen, showToast, Switch, Tooltip } from "@calcom/ui/v2";
-import ConfirmationDialogContent from "@calcom/ui/v2/core/ConfirmationDialogContent";
-import Dropdown, {
+import { RouterOutputs, trpc, TRPCClientError } from "@calcom/trpc/react";
+import {
+  Badge,
+  Button,
+  ButtonGroup,
+  ConfirmationDialogContent,
+  Dialog,
+  Dropdown,
   DropdownItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuPortal,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-  DropdownMenuPortal,
-} from "@calcom/ui/v2/core/Dropdown";
-import Shell from "@calcom/ui/v2/core/Shell";
-import CreateEventTypeButton from "@calcom/ui/v2/modules/event-types/CreateEventType";
-import EventTypeDescription from "@calcom/ui/v2/modules/event-types/EventTypeDescription";
+  EmptyScreen,
+  EventTypeDescription,
+  Icon,
+  Shell,
+  showToast,
+  Switch,
+  Tooltip,
+} from "@calcom/ui";
 
 import { withQuery } from "@lib/QueryCell";
 import { HttpError } from "@lib/core/http/error";
 
 import { EmbedButton, EmbedDialog } from "@components/Embed";
+import SkeletonLoader from "@components/eventtype/SkeletonLoader";
 import Avatar from "@components/ui/Avatar";
 import AvatarGroup from "@components/ui/AvatarGroup";
-import SkeletonLoader from "@components/v2/eventtype/SkeletonLoader";
 
-type EventTypeGroups = inferQueryOutput<"viewer.eventTypes">["eventTypeGroups"];
+import { ssrInit } from "@server/lib/ssr";
+
+type EventTypeGroups = RouterOutputs["viewer"]["eventTypes"]["getByViewer"]["eventTypeGroups"];
 type EventTypeGroupProfile = EventTypeGroups[number]["profile"];
 
 interface EventTypeListHeadingProps {
   profile: EventTypeGroupProfile;
   membershipCount: number;
+  teamId?: number | null;
 }
 
-type EventTypeGroup = inferQueryOutput<"viewer.eventTypes">["eventTypeGroups"][number];
+type EventTypeGroup = EventTypeGroups[number];
 type EventType = EventTypeGroup["eventTypes"][number];
 interface EventTypeListProps {
   group: EventTypeGroup;
@@ -54,11 +64,11 @@ const Item = ({ type, group, readOnly }: { type: EventType; group: EventTypeGrou
   return (
     <Link href={`/event-types/${type.id}?tabName=setup`}>
       <a
-        className="flex-grow truncate text-sm"
+        className="flex-1 overflow-hidden pr-4 text-sm"
         title={`${type.title} ${type.description ? `– ${type.description}` : ""}`}>
         <div>
           <span
-            className="truncate font-semibold text-gray-700 ltr:mr-1 rtl:ml-1"
+            className="font-semibold text-gray-700 ltr:mr-1 rtl:ml-1"
             data-testid={"event-type-title-" + type.id}>
             {type.title}
           </span>
@@ -86,25 +96,49 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteDialogTypeId, setDeleteDialogTypeId] = useState(0);
   const utils = trpc.useContext();
-  const mutation = trpc.useMutation("viewer.eventTypeOrder", {
+  const mutation = trpc.viewer.eventTypeOrder.useMutation({
     onError: async (err) => {
       console.error(err.message);
-      await utils.cancelQuery(["viewer.eventTypes"]);
-      await utils.invalidateQueries(["viewer.eventTypes"]);
+      await utils.viewer.eventTypes.getByViewer.cancel();
+      // REVIEW: Should we invalidate the entire router or just the `getByViewer` query?
+      await utils.viewer.eventTypes.invalidate();
     },
     onSettled: () => {
-      utils.invalidateQueries(["viewer.eventTypes"]);
+      // REVIEW: Should we invalidate the entire router or just the `getByViewer` query?
+      utils.viewer.eventTypes.invalidate();
     },
   });
 
-  const setHiddenMutation = trpc.useMutation("viewer.eventTypes.update", {
-    onError: async (err) => {
-      console.error(err.message);
-      await utils.cancelQuery(["viewer.eventTypes"]);
-      await utils.invalidateQueries(["viewer.eventTypes"]);
+  const setHiddenMutation = trpc.viewer.eventTypes.update.useMutation({
+    onMutate: async ({ id }) => {
+      await utils.viewer.eventTypes.getByViewer.cancel();
+      const previousValue = utils.viewer.eventTypes.getByViewer.getData();
+      if (previousValue) {
+        const newList = [...types];
+        const itemIndex = newList.findIndex((item) => item.id === id);
+        if (itemIndex !== -1 && newList[itemIndex]) {
+          newList[itemIndex].hidden = !newList[itemIndex].hidden;
+        }
+        utils.viewer.eventTypes.getByViewer.setData(undefined, {
+          ...previousValue,
+          eventTypeGroups: [
+            ...previousValue.eventTypeGroups.slice(0, groupIndex),
+            { ...group, eventTypes: newList },
+            ...previousValue.eventTypeGroups.slice(groupIndex + 1),
+          ],
+        });
+      }
+      return { previousValue };
     },
-    onSettled: async () => {
-      await utils.invalidateQueries(["viewer.eventTypes"]);
+    onError: async (err, _, context) => {
+      if (context?.previousValue) {
+        utils.viewer.eventTypes.getByViewer.setData(undefined, context.previousValue);
+      }
+      console.error(err.message);
+    },
+    onSettled: () => {
+      // REVIEW: Should we invalidate the entire router or just the `getByViewer` query?
+      utils.viewer.eventTypes.invalidate();
     },
   });
 
@@ -118,11 +152,11 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
       newList[index + increment] = type;
     }
 
-    await utils.cancelQuery(["viewer.eventTypes"]);
+    await utils.viewer.eventTypes.getByViewer.cancel();
 
-    const previousValue = utils.getQueryData(["viewer.eventTypes"]);
+    const previousValue = utils.viewer.eventTypes.getByViewer.getData();
     if (previousValue) {
-      utils.setQueryData(["viewer.eventTypes"], {
+      utils.viewer.eventTypes.getByViewer.setData(undefined, {
         ...previousValue,
         eventTypeGroups: [
           ...previousValue.eventTypeGroups.slice(0, groupIndex),
@@ -154,6 +188,7 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
       length: type.length,
       type: type.schedulingType,
       teamId: group.teamId,
+      locations: encodeURIComponent(JSON.stringify(type.locations)),
     };
     if (!group.teamId) {
       delete query.teamId;
@@ -168,13 +203,32 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
     );
   };
 
-  const deleteMutation = trpc.useMutation("viewer.eventTypes.delete", {
-    onSuccess: async () => {
-      await utils.invalidateQueries(["viewer.eventTypes"]);
+  const deleteMutation = trpc.viewer.eventTypes.delete.useMutation({
+    onSuccess: () => {
       showToast(t("event_type_deleted_successfully"), "success");
       setDeleteDialogOpen(false);
     },
-    onError: (err) => {
+    onMutate: async ({ id }) => {
+      await utils.viewer.eventTypes.getByViewer.cancel();
+      const previousValue = utils.viewer.eventTypes.getByViewer.getData();
+      if (previousValue) {
+        const newList = types.filter((item) => item.id !== id);
+
+        utils.viewer.eventTypes.getByViewer.setData(undefined, {
+          ...previousValue,
+          eventTypeGroups: [
+            ...previousValue.eventTypeGroups.slice(0, groupIndex),
+            { ...group, eventTypes: newList },
+            ...previousValue.eventTypeGroups.slice(groupIndex + 1),
+          ],
+        });
+      }
+      return { previousValue };
+    },
+    onError: (err, _, context) => {
+      if (context?.previousValue) {
+        utils.viewer.eventTypes.getByViewer.setData(undefined, context.previousValue);
+      }
       if (err instanceof HttpError) {
         const message = `${err.statusCode}: ${err.message}`;
         showToast(message, "error");
@@ -182,6 +236,10 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
       } else if (err instanceof TRPCClientError) {
         showToast(err.message, "error");
       }
+    },
+    onSettled: () => {
+      // REVIEW: Should we invalidate the entire router or just the `getByViewer` query?
+      utils.viewer.eventTypes.invalidate();
     },
   });
 
@@ -203,8 +261,8 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
           const calLink = `${CAL_URL}/${embedLink}`;
           return (
             <li key={type.id}>
-              <div className="flex items-center justify-between hover:bg-neutral-50">
-                <div className="group flex w-full items-center justify-between px-4 py-4 pr-0 sm:px-6">
+              <div className="flex w-full items-center justify-between hover:bg-neutral-50">
+                <div className="group flex w-full max-w-full items-center justify-between overflow-hidden px-4 py-4 sm:px-6">
                   {!(firstItem && firstItem.id === type.id) && (
                     <button
                       className="invisible absolute left-[5px] -mt-4 mb-4 -ml-4 hidden h-6 w-6 scale-0 items-center justify-center rounded-md border bg-white p-1 text-gray-400 transition-all hover:border-transparent hover:text-black hover:shadow disabled:hover:border-inherit disabled:hover:text-gray-400 disabled:hover:shadow-none group-hover:visible group-hover:scale-100 sm:ml-0 sm:flex lg:left-[36px]"
@@ -221,7 +279,7 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
                     </button>
                   )}
                   <MemoizedItem type={type} group={group} readOnly={readOnly} />
-                  <div className="mt-4 hidden flex-shrink-0 sm:mt-0 sm:ml-5 sm:flex">
+                  <div className="mt-4 hidden sm:mt-0 sm:flex">
                     <div className="flex justify-between space-x-2 rtl:space-x-reverse">
                       {type.users?.length > 1 && (
                         <AvatarGroup
@@ -262,7 +320,6 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
                               size="icon"
                               href={calLink}
                               StartIcon={Icon.FiExternalLink}
-                              combined
                             />
                           </Tooltip>
 
@@ -275,16 +332,17 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
                                 showToast(t("link_copied"), "success");
                                 navigator.clipboard.writeText(calLink);
                               }}
-                              combined
                             />
                           </Tooltip>
                           <Dropdown modal={false}>
-                            <DropdownMenuTrigger asChild data-testid={"event-type-options-" + type.id}>
+                            <DropdownMenuTrigger
+                              asChild
+                              data-testid={"event-type-options-" + type.id}
+                              className="radix-state-open:rounded-r-md">
                               <Button
                                 type="button"
                                 size="icon"
                                 color="secondary"
-                                combined
                                 StartIcon={Icon.FiMoreHorizontal}
                               />
                             </DropdownMenuTrigger>
@@ -339,7 +397,7 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
                     </div>
                   </div>
                 </div>
-                <div className="mr-5 flex flex-shrink-0 sm:hidden">
+                <div className="min-w-9 mr-5 flex sm:hidden">
                   <Dropdown>
                     <DropdownMenuTrigger asChild data-testid={"event-type-options-" + type.id}>
                       <Button type="button" size="icon" color="secondary" StartIcon={Icon.FiMoreHorizontal} />
@@ -384,7 +442,7 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
                                 navigator
                                   .share({
                                     title: t("share"),
-                                    text: t("share_event"),
+                                    text: t("share_event", { appName: APP_NAME }),
                                     url: calLink,
                                   })
                                   .then(() => showToast(t("link_shared"), "success"))
@@ -439,7 +497,6 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
       </ul>
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <ConfirmationDialogContent
-          isLoading={deleteMutation.isLoading}
           variety="danger"
           title={t("delete_event_type")}
           confirmBtnText={t("confirm_delete_event_type")}
@@ -455,10 +512,14 @@ export const EventTypeList = ({ group, groupIndex, readOnly, types }: EventTypeL
   );
 };
 
-const EventTypeListHeading = ({ profile, membershipCount }: EventTypeListHeadingProps): JSX.Element => {
+const EventTypeListHeading = ({
+  profile,
+  membershipCount,
+  teamId,
+}: EventTypeListHeadingProps): JSX.Element => {
   return (
     <div className="mb-4 flex">
-      <Link href="/settings/teams">
+      <Link href={teamId ? `/settings/teams/${teamId}/profile` : "/settings/my-account/profile"}>
         <a>
           <Avatar
             alt={profile?.name || ""}
@@ -469,12 +530,12 @@ const EventTypeListHeading = ({ profile, membershipCount }: EventTypeListHeading
         </a>
       </Link>
       <div>
-        <Link href="/settings/teams">
+        <Link href={teamId ? `/settings/teams/${teamId}/profile` : "/settings/my-account/profile"}>
           <a className="font-bold">{profile?.name || ""}</a>
         </Link>
-        {membershipCount && (
+        {membershipCount && teamId && (
           <span className="relative -top-px text-xs text-neutral-500 ltr:ml-2 rtl:mr-2">
-            <Link href="/settings/teams">
+            <Link href={`/settings/teams/${teamId}/members`}>
               <a>
                 <Badge variant="gray">
                   <Icon.FiUsers className="mr-1 -mt-px inline h-3 w-3" />
@@ -509,23 +570,20 @@ const CreateFirstEventTypeView = () => {
 };
 
 const CTA = () => {
-  const query = trpc.useQuery(["viewer.eventTypes"]);
+  const query = trpc.viewer.eventTypes.getByViewer.useQuery();
 
   if (!query.data) return null;
 
   return <CreateEventTypeButton canAddEvents={true} options={query.data.profiles} />;
 };
 
-const WithQuery = withQuery(["viewer.eventTypes"]);
+const WithQuery = withQuery(trpc.viewer.eventTypes.getByViewer);
 
 const EventTypesPage = () => {
   const { t } = useLocale();
+
   return (
     <div>
-      <Head>
-        <title>Home | Cal.com</title>
-        <link rel="icon" href="/favicon.ico" />
-      </Head>
       <Shell
         heading={t("event_types_page_title") as string}
         subtitle={t("event_types_page_subtitle") as string}
@@ -541,6 +599,7 @@ const EventTypesPage = () => {
                     <EventTypeListHeading
                       profile={group.profile}
                       membershipCount={group.metadata.membershipCount}
+                      teamId={group.teamId}
                     />
                   )}
                   <EventTypeList
@@ -560,6 +619,16 @@ const EventTypesPage = () => {
       </Shell>
     </div>
   );
+};
+
+export const getServerSideProps = async (context: GetServerSidePropsContext) => {
+  const ssr = await ssrInit(context);
+
+  return {
+    props: {
+      trpcState: ssr.dehydrate(),
+    },
+  };
 };
 
 export default EventTypesPage;
